@@ -133,6 +133,7 @@ def call_messages_agentic(
     agg_cost = 0.0
     final_text = ""
     last_stop = None
+    exhausted_with_tool_result = False
 
     for iteration in range(max_iterations):
         response = client.messages.create(
@@ -204,6 +205,39 @@ def call_messages_agentic(
                 "is_error": not result.get("ok", False),
             })
         messages.append({"role": "user", "content": tool_results})
+        exhausted_with_tool_result = iteration == max_iterations - 1
+
+    if exhausted_with_tool_result:
+        messages.append({
+            "role": "user",
+            "content": (
+                "You have reached the tool-use limit. Based only on the "
+                "available tool results, output the final artifact JSON now. "
+                "Do not use prose, code fences, or more tool calls."
+            ),
+        })
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=[{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=messages,
+        )
+        usage = response.usage
+        agg_in           += getattr(usage, "input_tokens", 0) or 0
+        agg_out          += getattr(usage, "output_tokens", 0) or 0
+        agg_cache_read   += getattr(usage, "cache_read_input_tokens", 0) or 0
+        agg_cache_create += getattr(usage, "cache_creation_input_tokens", 0) or 0
+        agg_cost         += compute_cost(model, usage, pricing)
+        last_stop = getattr(response, "stop_reason", None)
+        final_text = "".join(
+            getattr(block, "text", "")
+            for block in response.content
+            if getattr(block, "type", None) == "text"
+        )
 
     dt = time.monotonic() - t0
     return CallResult(

@@ -243,18 +243,26 @@ def test_agentic_loop_caps_iterations():
             usage=_Usage(input_tokens=10, output_tokens=5),
             stop_reason="tool_use",
         )
-    client = _ScriptedClient([make_response() for _ in range(50)])
+    client = _ScriptedClient([
+        *[make_response() for _ in range(5)],
+        _Resp(
+            content=[_Block(type="text", text='{"tests_run": 1, "passed": 1}')],
+            usage=_Usage(input_tokens=30, output_tokens=7),
+        ),
+    ])
     result = call_messages_agentic(
         client, model="m", system="s", user="u", max_tokens=64,
         pricing=_PRICING, tools=[{"name": "bash"}],
         tool_handler=lambda *a, **k: {"ok": True, "stdout": "", "stderr": "", "exit_code": 0},
         max_iterations=5,
     )
-    # We made exactly max_iterations calls and stopped, no infinite loop.
-    assert len(client.calls) == 5
+    # We made max_iterations tool calls, then one final no-tool synthesis call.
+    assert len(client.calls) == 6
+    assert "tools" not in client.calls[-1]
+    assert result.text == '{"tests_run": 1, "passed": 1}'
     # Aggregated metering is sum across rounds.
-    assert result.input_tokens == 50  # 10 * 5
-    assert result.output_tokens == 25
+    assert result.input_tokens == 80  # 10 * 5 + 30
+    assert result.output_tokens == 32  # 5 * 5 + 7
 
 
 def test_agentic_loop_marks_handler_failure_as_tool_error():
