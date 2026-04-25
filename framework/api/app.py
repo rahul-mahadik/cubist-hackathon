@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Response
 from fastapi.responses import JSONResponse
 
 from pydantic import BaseModel
@@ -179,7 +180,7 @@ def create_app(state_dir: str | Path) -> FastAPI:
             daily_cap_usd=float(cap) if cap else None,
         )
         if task is None:
-            return JSONResponse(status_code=204, content=None)
+            return Response(status_code=204)
         return task.model_dump()
 
     @app.post("/tasks/{task_id}/start", response_model=TaskOut)
