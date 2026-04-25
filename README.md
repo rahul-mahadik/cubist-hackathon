@@ -23,7 +23,7 @@ Verify:
 
 ```bash
 .venv/bin/pytest
-# 73 passed in ~3s
+# 130 passed in ~6s
 ```
 
 ---
@@ -47,14 +47,30 @@ The framework is a backend + at least one pod + a parent (your Claude Code sessi
 
 The bootstrap creates `./fw/` with `framework.db`, `config.yaml`, `CLAUDE.md` (the parent's role config), `agents/methodology.md`, `agents/development.md`, `agents/testing.md`, a starter `rolling_summary.md`, `progress.md`, and `run.yaml`.
 
-### Terminal 2 — start a pod
+### Terminal 2 — start one or more pods
 
 ```bash
 export ANTHROPIC_API_KEY_POD_A=sk-ant-...
 .venv/bin/python -m framework --state-dir ./fw start-pod pod_a
 ```
 
-The pod registers itself, polls every 2 seconds, claims one approved task at a time, calls Claude with the agent's role config from `agents/<role>.md`, and submits the result back through the after gate.
+The pod registers itself, polls every 2 seconds, claims one approved task at a time, calls Claude with the agent's role config from `agents/<role>.md`, and submits the result back through the after gate. Pods make real Anthropic calls with **tool use** (write_file, read_file, bash, sandboxed to the task's `working_dir`) — they actually edit files, not just describe what they would do.
+
+To run multiple pods concurrently, open one terminal per pod with its own per-pod env var:
+
+```bash
+# terminal 2a
+export ANTHROPIC_API_KEY_POD_A=sk-ant-...
+.venv/bin/python -m framework --state-dir ./fw start-pod pod_a
+
+# terminal 2b
+export ANTHROPIC_API_KEY_POD_B=sk-ant-...
+.venv/bin/python -m framework --state-dir ./fw start-pod pod_b
+```
+
+The convention is `ANTHROPIC_API_KEY_POD_<ID>` derived from the pod_id (so `pod_b` → `ANTHROPIC_API_KEY_POD_B`). Each pod can use a different key, which is useful for per-pod rate limiting and spend attribution. Override with `--api-key-env <NAME>` if you want.
+
+When two pods are running and you have parallel-able tasks (no deps between them), each pod gets its own **git worktree** of the target repo so they can edit files concurrently without stepping on each other. Worktrees are created at before-gate approve, branched off `framework/<run-id>`, and merged back into that branch on after-gate approve. See `framework/worktree.py`.
 
 ### Terminal 3 — your Claude Code session (the parent)
 
@@ -133,6 +149,13 @@ ANTHROPIC_API_KEY=sk-ant-... \
 .venv/bin/python -m framework --state-dir ./fw gate before reject t_xxxxx --reason "too vague, will respec"
 .venv/bin/python -m framework --state-dir ./fw gate after approve t_xxxxx
 .venv/bin/python -m framework --state-dir ./fw gate after reject t_xxxxx --reason "wrong file edited"
+
+# Batch-approve N tasks at the before gate in one process boot.
+# Important when you have parallel-able tasks: each `python -m framework`
+# costs ~1-2s of import overhead, so back-to-back per-task approvals leave
+# a gap big enough that a pod's 2s polling tick can fall in it. Batching
+# collapses the boot cost so multiple idle pods can claim in the same window.
+.venv/bin/python -m framework --state-dir ./fw gate before approve t_aaa t_bbb t_ccc
 ```
 
 ### Maintenance
@@ -196,12 +219,14 @@ fw/
 │   └── testing.md
 ├── plan/
 │   └── proposed_*.yaml      # methodology agent output
-└── logs/
-    ├── parent_actions.jsonl # every framework tool call (auto-logged)
-    ├── budget_ledger.jsonl  # one line per pod API call
-    ├── methodology_agent.md # per-agent change logs (Phase 5)
-    ├── development_agent.md
-    └── testing_agent.md
+├── logs/
+│   ├── parent_actions.jsonl # every framework tool call (auto-logged)
+│   ├── budget_ledger.jsonl  # one line per pod API call
+│   ├── methodology_agent.md # per-agent change logs (Phase 5)
+│   ├── development_agent.md
+│   └── testing_agent.md
+└── worktrees/                # v2 — per-task git worktrees (created at
+    └── t_xxxxx/              #   before-gate approve, removed at after-gate)
 ```
 
 ---
@@ -219,7 +244,7 @@ fw/
 .venv/bin/pytest tests/test_claim_concurrency.py -v
 ```
 
-73 tests, ~3 seconds wall time. No network calls — Anthropic SDK is replaced by an in-process fake.
+130 tests, ~6 seconds wall time. No network calls — Anthropic SDK is replaced by an in-process fake. The two-pod stress (`tests/test_two_pod_loops.py`) and the worktree integration (`tests/test_worktree_lifecycle.py`) drive the v2 features end-to-end.
 
 ---
 
@@ -240,6 +265,8 @@ See `METHODOLOGY_SIMPLIFIED.md` Section 4 for the design intent. The mapping to 
 | Framework tools (Section 5.2) | `framework/cli/commands.py`, `framework/cli/parser.py` |
 | Run bootstrap (Section 11 step 2) | `framework/bootstrap.py` |
 | Parent CLAUDE.md, agent role configs (Sections 5.1, 10) | `framework/templates/` |
+| Pod tool sandbox (write_file/read_file/bash) | `framework/pod/tools.py` |
+| Per-task git worktrees (v2) | `framework/worktree.py` |
 
 ---
 
@@ -258,16 +285,19 @@ If you find yourself wanting to violate one, stop and reconsider.
 
 ---
 
-## What's deferred to v2
+## What ships now (v2)
 
-Per Section 20:
-- Second pod (`POD_B`) with concurrent claiming
-- Experimental loop with candidate variants
-- Git worktrees for parallel candidate development
+- Phases 1–6 from Section 19 of the methodology
+- Pod tool use: write_file / read_file / bash, sandboxed to `working_dir`, gated by each role's `allowed_tools` frontmatter
+- Multiple concurrent pods with per-pod env-var keys (`ANTHROPIC_API_KEY_POD_<ID>`)
+- Per-task git worktrees on a `framework/<run-id>` branch, merged back into base on after-gate approve
+- Batch before-gate approve so independent tasks can be claimed in the same poll window
+
+## What's still deferred (v3)
+
+- Experimental loop with candidate variants (Section 20)
 - Cross-run memory
 - Soft gates with timers
 - Migrating framework tools from bash to an MCP server
 - Optional read-only web UI
-- `framework watch` live-status terminal pane (Section 7 — small, not in any build phase)
-
-The current build covers Phases 1–6 of Section 19.
+- `framework watch` live-status terminal pane (Section 7)

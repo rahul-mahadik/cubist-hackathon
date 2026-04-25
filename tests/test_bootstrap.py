@@ -114,3 +114,65 @@ def test_bootstrap_tolerates_non_git_target(tmp_path):
     run = yaml.safe_load((state / "run.yaml").read_text())
     # Plain dir → target_is_git: False, no branch created.
     assert run["target_is_git"] is False
+
+
+def test_bootstrap_seeds_gitignore_on_framework_branch(tmp_path):
+    """The auto-commit step on after-gate runs `git add -A` in each
+    per-task worktree. Without a .gitignore on the framework branch,
+    __pycache__ and friends end up committed alongside source.
+    Bootstrap should seed a default .gitignore as the first commit on
+    the framework branch (only when the user's branch HEAD doesn't
+    already track one)."""
+    target = tmp_path / "git-repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=target, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=target, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=target, check=True)
+    (target / "README.md").write_text("hi\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=target, check=True)
+
+    state = tmp_path / "fw"
+    info = bootstrap_run(state, goal="g", target_repo=str(target))
+    branch = info["branch_name"]
+
+    # The framework branch tracks .gitignore now.
+    proc = subprocess.run(
+        ["git", "cat-file", "-p", f"{branch}:.gitignore"],
+        cwd=target, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, "framework branch should have .gitignore"
+    assert "__pycache__" in proc.stdout
+    assert ".pytest_cache" in proc.stdout
+
+    # The user's main branch is untouched.
+    proc = subprocess.run(
+        ["git", "cat-file", "-e", "main:.gitignore"],
+        cwd=target, capture_output=True,
+    )
+    assert proc.returncode != 0, "main branch must not be touched"
+
+
+def test_bootstrap_does_not_overwrite_existing_gitignore(tmp_path):
+    """If the user's HEAD already tracks .gitignore, the framework
+    branch inherits theirs — we don't clobber it with the default."""
+    target = tmp_path / "git-repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=target, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=target, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=target, check=True)
+    (target / ".gitignore").write_text("# user's choice\nbuild/\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=target, check=True)
+
+    info = bootstrap_run(tmp_path / "fw", goal="g", target_repo=str(target))
+    branch = info["branch_name"]
+
+    proc = subprocess.run(
+        ["git", "cat-file", "-p", f"{branch}:.gitignore"],
+        cwd=target, capture_output=True, text=True, check=True,
+    )
+    assert "user's choice" in proc.stdout
+    assert "build/" in proc.stdout
+    # Default entries should NOT have been added.
+    assert "__pycache__" not in proc.stdout

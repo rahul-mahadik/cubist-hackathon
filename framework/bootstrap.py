@@ -20,6 +20,67 @@ from framework.state import StatePaths
 from framework.worktree import WorktreeError, ensure_branch, is_git_repo
 
 
+_DEFAULT_GITIGNORE = (
+    "__pycache__/\n"
+    "*.pyc\n"
+    "*.pyo\n"
+    ".pytest_cache/\n"
+    ".coverage\n"
+    ".venv/\n"
+    "venv/\n"
+    ".DS_Store\n"
+)
+
+
+def _seed_gitignore_on_branch(target_repo: Path, branch: str) -> None:
+    """Commit a default .gitignore on ``branch`` so per-task worktrees
+    forked from it inherit the exclusions. No-op if the branch already
+    has any .gitignore (we don't overwrite the user's choices) or if
+    the operation fails (best-effort — bootstrap continues).
+    """
+    import subprocess
+    import tempfile
+
+    # Check if .gitignore already exists on the branch.
+    proc = subprocess.run(
+        ["git", "cat-file", "-e", f"{branch}:.gitignore"],
+        cwd=target_repo, capture_output=True,
+    )
+    if proc.returncode == 0:
+        return  # already has one
+
+    with tempfile.TemporaryDirectory(prefix="fw-seed-") as td:
+        wt = Path(td) / "seed"
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", str(wt), branch],
+                cwd=target_repo, check=True, capture_output=True,
+            )
+            (wt / ".gitignore").write_text(
+                _DEFAULT_GITIGNORE, encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-c", "user.email=framework@local",
+                 "-c", "user.name=framework",
+                 "add", ".gitignore"],
+                cwd=wt, check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-c", "user.email=framework@local",
+                 "-c", "user.name=framework",
+                 "commit", "-m", "framework: seed .gitignore"],
+                cwd=wt, check=True, capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            # Best-effort — don't fail bootstrap if we can't seed.
+            pass
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(wt)],
+                cwd=target_repo, capture_output=True,
+            )
+
+
 def _new_run_id() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 
@@ -107,6 +168,15 @@ def bootstrap_run(
                 "Either commit/stash uncommitted state, switch to a "
                 "clean HEAD, or pass a different target_repo."
             ) from e
+        # Seed a .gitignore on the framework branch if the repo doesn't
+        # already track one. The auto-commit step on after-gate approve
+        # runs ``git add -A`` in each per-task worktree — without
+        # .gitignore, __pycache__, .pytest_cache, *.pyc, etc. all get
+        # committed onto the framework branch. We commit the ignore
+        # file directly onto the framework branch (via a temp worktree)
+        # so every per-task worktree forks from a state that excludes
+        # them. No-op if the user's repo already has a .gitignore.
+        _seed_gitignore_on_branch(target, branch_name)
 
     # Write a run-meta YAML so the parent can read goal + target_repo +
     # run_id without parsing config.yaml or guessing.
