@@ -45,7 +45,9 @@ SCHEMA_HINTS: dict[str, str] = {
     ),
     "TestResult": (
         '{"tests_run": 0, "passed": 0, "failed": [], '
-        '"runtime_seconds": 0.0}'
+        '"runtime_seconds": 0.0, '
+        '"metrics": {"<name>": "<number|string|boolean>"}, '
+        '"artifact_files": []}'
     ),
     "ProgressLogEntry": (
         '{"summary": "<one paragraph>", "notes": []}'

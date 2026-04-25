@@ -112,6 +112,24 @@ def test_pod_prompt_uses_agent_md_body_as_system():
     assert fm["output_artifact_contract"] == ["PatchSummary", "ProgressLogEntry"]
 
 
+def test_testresult_prompt_allows_metrics_and_artifact_files():
+    md = (
+        "---\nrole: testing\ndefault_model: claude-haiku-4-5-20251001\n"
+        "output_artifact_contract: [TestResult, ProgressLogEntry]\n"
+        "---\n"
+        "# Testing Subagent\n\nRun tests and evals.\n"
+    )
+    task = {
+        "task_id": "t_eval", "agent_role": "testing",
+        "goal_text": "Run chess eval and report Elo.",
+        "working_dir": "/repo",
+        "output_artifact_types": ["TestResult"],
+    }
+    _, user, _ = build_pod_prompt(agent_md_text=md, task=task)
+    assert "metrics" in user
+    assert "artifact_files" in user
+
+
 def test_contract_types_strips_progresslog():
     fm, _ = parse_agent_md(
         "---\noutput_artifact_contract: [PatchSummary, ProgressLogEntry]\n---\nbody\n"

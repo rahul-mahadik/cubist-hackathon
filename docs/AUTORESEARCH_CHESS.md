@@ -37,6 +37,18 @@ python3 -m pytest tests
 python3 -m tournament.runner alphabeta --move-budget-ms 200
 ```
 
+Each tournament run writes a JSON summary and PGN under `artifacts/evals/`.
+The JSON includes both `win_rate` and a rough `elo_delta`. The Elo number is
+derived from win rate, so treat it as a ranking convenience rather than a
+statistically rigorous rating.
+
+Print a compact eval table:
+
+```bash
+cd examples/chess_lab
+python3 -m tournament.summarize_evals
+```
+
 ## Local Cubist Run
 
 From the repo root:
@@ -98,6 +110,13 @@ Framework state:
 .venv/bin/python -m framework --state-dir ./fw-chess artifact list
 ```
 
+Approve every pending before-gate task in one shot when you want real
+wall-clock parallelism:
+
+```bash
+.venv/bin/python -m framework --state-dir ./fw-chess gate before approve-all
+```
+
 Audit files:
 
 ```text
@@ -107,6 +126,7 @@ fw-chess/logs/parent_actions.jsonl
 fw-chess/logs/budget_ledger.jsonl
 fw-chess/rolling_summary.md
 fw-chess/worktrees/
+examples/chess_lab/artifacts/evals/
 ```
 
 ## EC2 Recommendation
@@ -193,4 +213,3 @@ Pane 4: parent
 cd fw-chess
 claude
 ```
-
