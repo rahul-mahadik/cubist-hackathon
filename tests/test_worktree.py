@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from framework.worktree import (
-    WorktreeError, create_worktree, ensure_branch, extract_diff,
-    is_git_repo, remove_worktree,
+    WorktreeError, auto_commit_all, create_worktree, ensure_branch,
+    extract_diff, is_git_repo, merge_into_base, remove_worktree,
 )
 
 
@@ -143,3 +143,72 @@ def test_remove_worktree_safe_on_missing(repo, tmp_path):
     block on filesystem hiccups."""
     ghost = tmp_path / "never-existed"
     remove_worktree(repo, ghost)  # no exception
+
+
+def test_auto_commit_all_picks_up_untracked(repo, tmp_path):
+    ensure_branch(repo, "framework/run-001")
+    wt = create_worktree(repo, "framework/run-001", "t_x", tmp_path / "wt")
+    (wt / "new.py").write_text("x = 1\n")
+    made = auto_commit_all(wt, "auto")
+    assert made is True
+    # Check the commit landed.
+    log = subprocess.run(
+        ["git", "log", "--oneline"], cwd=wt,
+        capture_output=True, text=True, check=True,
+    )
+    assert "auto" in log.stdout
+
+
+def test_auto_commit_all_noop_when_clean(repo, tmp_path):
+    ensure_branch(repo, "framework/run-001")
+    wt = create_worktree(repo, "framework/run-001", "t_clean", tmp_path / "wt")
+    assert auto_commit_all(wt, "auto") is False
+
+
+def test_merge_into_base_fast_forwards_first_then_merges_second(repo, tmp_path):
+    """The realistic v2 flow: two parallel dev tasks each write a
+    different file, both get merged back to base. First merge is FF,
+    second creates a merge commit (different files, no conflicts)."""
+    ensure_branch(repo, "framework/run-001")
+
+    # Task A: greet.py on framework/run-001-t_a
+    wt_a = create_worktree(repo, "framework/run-001", "t_a", tmp_path / "wta")
+    (wt_a / "greet.py").write_text("def greet(): pass\n")
+    auto_commit_all(wt_a, "[t_a] auto")
+    remove_worktree(repo, wt_a)
+
+    # Task B: farewell.py on framework/run-001-t_b
+    wt_b = create_worktree(repo, "framework/run-001", "t_b", tmp_path / "wtb")
+    (wt_b / "farewell.py").write_text("def farewell(): pass\n")
+    auto_commit_all(wt_b, "[t_b] auto")
+    remove_worktree(repo, wt_b)
+
+    # Merge A into base (FF), then B (real merge).
+    merge_into_base(repo, "framework/run-001", "framework/run-001-t_a")
+    merge_into_base(repo, "framework/run-001", "framework/run-001-t_b")
+
+    # Verify base has both files. Use a third worktree to inspect.
+    inspect = create_worktree(
+        repo, "framework/run-001", "t_inspect", tmp_path / "inspect",
+    )
+    assert (inspect / "greet.py").exists()
+    assert (inspect / "farewell.py").exists()
+
+
+def test_merge_into_base_raises_on_conflict(repo, tmp_path):
+    """Two branches that touch the same file with incompatible changes
+    must fail loudly so the gate transition can surface the issue."""
+    ensure_branch(repo, "framework/run-001")
+    wt_a = create_worktree(repo, "framework/run-001", "t_a", tmp_path / "wta")
+    (wt_a / "shared.py").write_text("VAL = 1\n")
+    auto_commit_all(wt_a, "[t_a]")
+    remove_worktree(repo, wt_a)
+
+    wt_b = create_worktree(repo, "framework/run-001", "t_b", tmp_path / "wtb")
+    (wt_b / "shared.py").write_text("VAL = 2\n")
+    auto_commit_all(wt_b, "[t_b]")
+    remove_worktree(repo, wt_b)
+
+    merge_into_base(repo, "framework/run-001", "framework/run-001-t_a")
+    with pytest.raises(WorktreeError, match="merge"):
+        merge_into_base(repo, "framework/run-001", "framework/run-001-t_b")

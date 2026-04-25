@@ -218,10 +218,27 @@ def cmd_plan_edit(ctx: CliContext, task_id: str, field: str, value: str) -> int:
     return 0
 
 
-def cmd_gate_before_approve(ctx: CliContext, task_id: str) -> int:
-    t = ctx.backend.approve_before(task_id)
-    ctx.log_action("framework_gate_before_approve", {"task_id": task_id})
-    ctx.stdout.write(f"task {task_id} → {t['status']}\n")
+def cmd_gate_before_approve(
+    ctx: CliContext, task_id: str | list[str],
+) -> int:
+    """Approve one or more tasks at the before gate.
+
+    Accepting a list lets the caller flip several tasks to ``ready`` in
+    a single ``python -m framework`` invocation, which collapses the
+    ~1–2s Python boot time per task into one. Concretely: when two
+    independent dev tasks share no dependencies, batching their
+    approval lets two pods polling at 2s actually claim them in the
+    same window — wall-clock parallelism that sequential per-task
+    invocations miss because of the boot-overhead gap.
+    """
+    task_ids = [task_id] if isinstance(task_id, str) else list(task_id)
+    if not task_ids:
+        ctx.stderr.write("no task_ids provided\n")
+        return 2
+    for tid in task_ids:
+        t = ctx.backend.approve_before(tid)
+        ctx.log_action("framework_gate_before_approve", {"task_id": tid})
+        ctx.stdout.write(f"task {tid} → {t['status']}\n")
     return 0
 
 

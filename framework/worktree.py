@@ -138,6 +138,79 @@ def extract_diff(worktree_path: str | Path, base_branch: str) -> str:
     return "\n".join(parts)
 
 
+def auto_commit_all(
+    worktree_path: str | Path, message: str,
+) -> bool:
+    """Stage and commit everything in the worktree. Returns True if a
+    commit was made, False if there was nothing to commit.
+
+    Pods don't always remember to ``git commit`` — they edit files via
+    the write_file tool and trust the framework to capture the result.
+    Without this auto-commit, ``git worktree remove`` would silently
+    drop uncommitted changes when the task is cleaned up.
+    """
+    wt = Path(worktree_path)
+    if not wt.exists():
+        return False
+    # Configure user only for this commit so the worktree doesn't depend
+    # on the user's git config (which may not be set on a CI machine).
+    _git(["add", "-A"], cwd=wt, check=False)
+    status = _git(["status", "--porcelain"], cwd=wt, check=False).stdout
+    if not status.strip():
+        return False
+    _git(
+        ["-c", "user.email=framework@local",
+         "-c", "user.name=framework",
+         "commit", "-m", message],
+        cwd=wt,
+    )
+    return True
+
+
+def merge_into_base(
+    target_repo: str | Path, base_branch: str, task_branch: str,
+) -> None:
+    """Merge ``task_branch`` into ``base_branch`` on the target repo.
+
+    Uses a temporary worktree so the user's main checkout (typically on
+    ``main`` or whatever they had before bootstrap) isn't disturbed.
+    Default merge strategy — sibling task branches don't touch the same
+    files (by methodology, each dev task scopes a single change), so
+    conflicts shouldn't happen. If they do, we abort the merge and
+    raise so the gate transition fails loudly rather than leaving a
+    half-merged base.
+
+    Concurrency note: parallel after-gate approvals could race here.
+    For v2 we rely on the gate being user-driven (sequential), but a
+    future hardening would file-lock or queue these.
+    """
+    import tempfile
+    target = Path(target_repo).resolve()
+    if not is_git_repo(target):
+        raise WorktreeError(f"{target} is not a git repository")
+    with tempfile.TemporaryDirectory(prefix="fw-merge-") as td:
+        merge_wt = Path(td) / "merge"
+        _git(["worktree", "add", str(merge_wt), base_branch], cwd=target)
+        try:
+            proc = _git(
+                ["-c", "user.email=framework@local",
+                 "-c", "user.name=framework",
+                 "merge", "--no-edit", task_branch],
+                cwd=merge_wt, check=False,
+            )
+            if proc.returncode != 0:
+                _git(["merge", "--abort"], cwd=merge_wt, check=False)
+                raise WorktreeError(
+                    f"merge of {task_branch!r} into {base_branch!r} failed:\n"
+                    f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+                )
+        finally:
+            _git(
+                ["worktree", "remove", "--force", str(merge_wt)],
+                cwd=target, check=False,
+            )
+
+
 def remove_worktree(target_repo: str | Path, worktree_path: str | Path) -> None:
     """Tear down a worktree. Best-effort — never raises.
 

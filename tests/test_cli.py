@@ -199,6 +199,42 @@ def test_gate_before_approve_and_reject(cli_env):
     assert "framework_gate_before_reject" in tools
 
 
+def test_gate_before_approve_batch(cli_env):
+    """Approve multiple tasks in one CLI invocation. The motivation:
+    when two independent tasks have no dependencies on each other,
+    flipping them to 'ready' in the same process collapses ~1–2s of
+    Python boot overhead per task into one — letting two pods
+    polling at 2s claim them in the same window."""
+    ctx, db, paths, _, _ = cli_env
+    t1 = _seed_task(db, paths)
+    t2 = _seed_task(db, paths)
+    t3 = _seed_task(db, paths)
+
+    rc = C.cmd_gate_before_approve(ctx, [t1, t2, t3])
+    assert rc == 0
+    assert svc.get_task(db, t1).status == "ready"
+    assert svc.get_task(db, t2).status == "ready"
+    assert svc.get_task(db, t3).status == "ready"
+
+    # parent_actions has one row per approved task — auditable.
+    actions = [a for a in _parent_actions(db)
+               if a["tool"] == "framework_gate_before_approve"]
+    approved = {json.loads(a["args"])["task_id"] for a in actions}
+    assert approved == {t1, t2, t3}
+
+
+def test_gate_before_approve_argparse_passes_list_of_ids():
+    """The CLI parser binds nargs='+' so the command always receives
+    a list, even for a single ID. Lock that contract in."""
+    from framework.cli.parser import build_parser
+    args = build_parser().parse_args(
+        ["gate", "before", "approve", "t_a", "t_b"]
+    )
+    assert args.task_id == ["t_a", "t_b"]
+    args1 = build_parser().parse_args(["gate", "before", "approve", "t_solo"])
+    assert args1.task_id == ["t_solo"]
+
+
 def test_gate_after_approve_and_reject_cycle(cli_env):
     ctx, db, paths, out, _ = cli_env
     tid = _seed_task(db, paths)

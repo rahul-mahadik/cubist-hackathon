@@ -78,35 +78,29 @@ def test_dev_task_gets_worktree_on_before_approve(gitenv):
     assert proc.stdout.strip() == f"{branch}-{tid}"
 
 
-def test_testing_task_shares_dev_worktree(gitenv):
-    """When a testing task depends on a dev task that has a worktree,
-    its working_dir is set to the same worktree (read-only by role)."""
+def test_testing_task_gets_its_own_worktree_from_base(gitenv):
+    """Testing tasks get a fresh worktree from the base branch on
+    approve. By then any dev dependencies have already been merged
+    into base (at their own after-gate approve), so the testing
+    worktree sees the latest approved state. Read-only access is
+    enforced by the role's allowed_tools (no filesystem_write), not
+    by branch isolation."""
     ctx = gitenv["ctx"]
     target = gitenv["target"]
-
-    dev_spec = TaskCreate(
-        agent_role="development", goal_text="write code",
-        output_artifact_types=["PatchSummary"], working_dir=str(target),
-    )
-    dev = ctx.backend.create_task(dev_spec.model_dump(),
-                                  initial_status="before_gate")
-    C.cmd_gate_before_approve(ctx, dev["task_id"])
-    dev_after = ctx.backend.get_task(dev["task_id"])
 
     test_spec = TaskCreate(
         agent_role="testing", goal_text="run tests",
         output_artifact_types=["TestResult"], working_dir=str(target),
-        depends_on=[dev["task_id"]],
     )
     test = ctx.backend.create_task(test_spec.model_dump(),
                                    initial_status="before_gate")
     C.cmd_gate_before_approve(ctx, test["task_id"])
-    test_after = ctx.backend.get_task(test["task_id"])
+    after = ctx.backend.get_task(test["task_id"])
 
-    # Testing task's working_dir is the dev's worktree, but it has no
-    # worktree_path of its own (it doesn't own one).
-    assert test_after["working_dir"] == dev_after["worktree_path"]
-    assert test_after["worktree_path"] is None
+    assert after["worktree_path"] is not None
+    assert after["working_dir"] == after["worktree_path"]
+    assert Path(after["worktree_path"]).is_dir()
+    assert Path(after["worktree_path"]).name == test["task_id"]
 
 
 def _force_claim(db, task_id: str, pod_id: str = "pod_a") -> None:
@@ -209,44 +203,42 @@ def test_after_gate_reject_removes_worktree_without_diff(gitenv):
     assert "diff" not in patch["content"]
 
 
-def test_testing_approve_does_not_remove_dev_worktree(gitenv):
-    """Testing role shares the dev's worktree but doesn't own it.
-    Approving a testing task must NOT tear down the dev's worktree."""
+def test_testing_approve_removes_own_worktree_without_merging(gitenv):
+    """Testing tasks own their worktree (since v2.1) and clean it up
+    on after-gate approve. But unlike dev: no auto-commit, no merge —
+    the testing role is read-only by contract."""
     from framework.models import TaskCreate
     ctx, target = gitenv["ctx"], gitenv["target"]
     ctx.backend.register_pod("pod_a")
 
-    dev_spec = TaskCreate(
-        agent_role="development", goal_text="d",
-        output_artifact_types=["PatchSummary"], working_dir=str(target),
-    )
-    dev = ctx.backend.create_task(dev_spec.model_dump(),
-                                  initial_status="before_gate")
-    C.cmd_gate_before_approve(ctx, dev["task_id"])
-    dev_wt = Path(ctx.backend.get_task(dev["task_id"])["worktree_path"])
-
     test_spec = TaskCreate(
         agent_role="testing", goal_text="run tests",
         output_artifact_types=["TestResult"], working_dir=str(target),
-        depends_on=[dev["task_id"]],
     )
     test = ctx.backend.create_task(test_spec.model_dump(),
                                    initial_status="before_gate")
     C.cmd_gate_before_approve(ctx, test["task_id"])
+    test_wt = Path(ctx.backend.get_task(test["task_id"])["worktree_path"])
+    assert test_wt.exists()
 
-    # Drive test task → after_gate with a TestResult.
     _submit_canned_patch(
         ctx, gitenv["db"], test["task_id"],
         artifact_type="TestResult", agent="testing",
         content={"tests_run": 1, "passed": 1, "failed": [],
                  "runtime_seconds": 0.1},
     )
-
-    # Approving the testing task must NOT remove the dev's worktree.
     C.cmd_gate_after_approve(ctx, test["task_id"])
-    assert dev_wt.exists(), "testing approve incorrectly removed dev's worktree"
-    # Dev task still has its worktree_path.
-    assert ctx.backend.get_task(dev["task_id"])["worktree_path"] == str(dev_wt)
+
+    # Worktree gone; worktree_path cleared.
+    final = ctx.backend.get_task(test["task_id"])
+    assert final["status"] == "done"
+    assert final["worktree_path"] is None
+    assert not test_wt.exists()
+    # TestResult artifact has no `diff` field — testing role doesn't
+    # auto-commit or capture diffs.
+    arts = ctx.backend.list_artifacts(task_id=test["task_id"])
+    tr = next(a for a in arts if a["artifact_type"] == "TestResult")
+    assert "diff" not in tr["content"]
 
 
 def test_worktree_skipped_for_non_git_target(tmp_path):

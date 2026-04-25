@@ -351,49 +351,35 @@ def _maybe_create_worktree_on_approve(
 
     from framework.worktree import WorktreeError, create_worktree
 
-    if task.agent_role == "development":
-        try:
-            wt = create_worktree(
-                target_repo, base_branch, task.task_id,
-                state_paths.worktrees_dir,
-            )
-        except WorktreeError as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                "worktree creation failed for %s: %s", task.task_id, e,
-            )
-            return
-        db.execute(
-            "UPDATE tasks SET working_dir = ?, worktree_path = ? "
-            "WHERE task_id = ?",
-            (str(wt), str(wt), task.task_id),
+    # Both dev and testing get a fresh worktree from the base branch.
+    # By the time a testing task is approved, its dev dependencies have
+    # already been approved at after-gate (merged into base), so the
+    # base branch reflects the latest approved state. Testing reads
+    # but doesn't write — its `allowed_tools` excludes filesystem_write
+    # — so the contract is enforced by the pod, not by branch isolation.
+    try:
+        wt = create_worktree(
+            target_repo, base_branch, task.task_id,
+            state_paths.worktrees_dir,
         )
-        emit_event(
-            db, events_jsonl, "worktree_created",
-            task_id=task.task_id,
-            payload={"worktree_path": str(wt), "branch": f"{base_branch}-{task.task_id}"},
+    except WorktreeError as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "worktree creation failed for %s: %s", task.task_id, e,
         )
         return
-
-    # task.agent_role == "testing": share an upstream dev task's worktree
-    # if any of its dependencies has one. Multiple readers on a single
-    # worktree are fine.
-    for dep_id in task.depends_on or []:
-        try:
-            dep = get_task(db, dep_id)
-        except TaskNotFound:
-            continue
-        if dep.worktree_path and dep.agent_role == "development":
-            db.execute(
-                "UPDATE tasks SET working_dir = ? WHERE task_id = ?",
-                (dep.worktree_path, task.task_id),
-            )
-            emit_event(
-                db, events_jsonl, "worktree_shared",
-                task_id=task.task_id,
-                payload={"shared_from": dep_id, "worktree_path": dep.worktree_path},
-            )
-            return
+    db.execute(
+        "UPDATE tasks SET working_dir = ?, worktree_path = ? "
+        "WHERE task_id = ?",
+        (str(wt), str(wt), task.task_id),
+    )
+    emit_event(
+        db, events_jsonl, "worktree_created",
+        task_id=task.task_id,
+        payload={"worktree_path": str(wt),
+                 "branch": f"{base_branch}-{task.task_id}",
+                 "role": task.agent_role},
+    )
 
 
 def approve_before(
@@ -598,9 +584,10 @@ def _maybe_cleanup_worktree(
     PatchSummary can record what changed. Best-effort — the gate
     transition has already happened by the time this runs.
 
-    Testing tasks that share a dev worktree don't own it: leave it alone.
+    Testing-role worktrees are removed but not merged (read-only by
+    role contract; nothing to push back to base).
     """
-    if task.agent_role != "development":
+    if task.agent_role not in ("development", "testing"):
         return None
     if not task.worktree_path:
         return None
@@ -614,9 +601,36 @@ def _maybe_cleanup_worktree(
 
     diff_text: str | None = None
     try:
-        from framework.worktree import extract_diff, remove_worktree
-        if capture_diff:
+        from framework.worktree import (
+            auto_commit_all, extract_diff, merge_into_base, remove_worktree,
+        )
+        if capture_diff and task.agent_role == "development":
+            # Auto-commit any pod edits the model didn't commit itself,
+            # so the per-task branch reflects the work and the merge
+            # has something to fast-forward.
+            auto_commit_all(
+                task.worktree_path,
+                f"[{task.task_id}] auto-commit on after-gate approve",
+            )
             diff_text = extract_diff(task.worktree_path, base_branch) or None
+            # Merge the per-task branch into base so downstream tasks
+            # (whose worktrees fork from base at before-gate approve)
+            # see the just-approved changes.
+            task_branch = f"{base_branch}-{task.task_id}"
+            try:
+                merge_into_base(target_repo, base_branch, task_branch)
+                emit_event(
+                    db, events_jsonl, "plan_revised",
+                    task_id=task.task_id,
+                    payload={"event": "merged_into_base",
+                             "branch": task_branch, "base": base_branch},
+                )
+            except Exception as merge_err:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "merge into %s failed for %s: %s — branch left dangling",
+                    base_branch, task.task_id, merge_err,
+                )
         remove_worktree(target_repo, task.worktree_path)
     except Exception:
         import logging

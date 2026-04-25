@@ -99,8 +99,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_before = gate_sub.add_parser("before")
     before_sub = p_before.add_subparsers(dest="before_action", required=True)
-    p_before_app = before_sub.add_parser("approve")
-    p_before_app.add_argument("task_id")
+    p_before_app = before_sub.add_parser(
+        "approve",
+        help="approve one or more tasks at the before gate. Pass multiple "
+             "task IDs to flip them all to 'ready' in one invocation, so "
+             "two pods can claim independent tasks in the same poll window.",
+    )
+    p_before_app.add_argument("task_id", nargs="+")
     p_before_app.set_defaults(_kind="cli",
                               func=lambda ctx, a: C.cmd_gate_before_approve(ctx, a.task_id))
     p_before_rej = before_sub.add_parser("reject")
