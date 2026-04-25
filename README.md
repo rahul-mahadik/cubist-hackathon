@@ -4,6 +4,8 @@ A multi-agent orchestration framework built on the Anthropic API. You describe a
 
 The full design is in [`METHODOLOGY_SIMPLIFIED.md`](./METHODOLOGY_SIMPLIFIED.md). This README is just how to run it.
 
+This fork also includes an AutoResearch chess target in [`examples/chess_lab`](./examples/chess_lab). See [`docs/AUTORESEARCH_CHESS.md`](./docs/AUTORESEARCH_CHESS.md) for the experiment runbook and EC2 setup.
+
 ---
 
 ## Install

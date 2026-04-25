@@ -9,6 +9,8 @@ venv/
 .env
 framework-state/
 fw/
+artifacts/
+examples/chess_lab/artifacts/
 *.db
 *.db-wal
 *.db-shm
